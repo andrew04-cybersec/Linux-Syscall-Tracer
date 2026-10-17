@@ -1,9 +1,12 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 #include <sys/ptrace.h>
 #include <sys/wait.h>
+#include <sys/syscall.h>
 #include <sys/user.h>
+#include "syscalls.h"
 
 //resume the stopped child until it exits, printing the raw number of each syscall it makes.
 static int trace_loop(pid_t pid)
@@ -35,20 +38,41 @@ static int trace_loop(pid_t pid)
             sig = 0;
             //syscall stops come in pairs, entry then exit. in_syscall flips on every stop, so it tells us which one this is.
             in_syscall = !in_syscall;
+            struct user_regs_struct regs;
+            if (ptrace(PTRACE_GETREGS, pid, NULL, &regs) == -1) {
+                perror("ptrace(GETREGS)");
+                return 1;
+            }
             if (in_syscall) {
-                struct user_regs_struct regs;
-                if (ptrace(PTRACE_GETREGS, pid, NULL, &regs) == -1) {
-                    perror("ptrace(GETREGS)");
-                    return 1;
-                }
                 //orig_rax over rax because orig_rax stores original syscall number for userspace and won't get overwritten
-                printf("syscall(%llu)\n", regs.orig_rax);
+                const char *name = syscall_name((long)regs.orig_rax);
+                if (name)
+                    printf("%s", name);
+                else
+                    printf("syscall_%llu", regs.orig_rax);
+                //flush so our output stays in order with whatever the child writes before this syscall returns.
+                fflush(stdout);
+            } else {
+                //read rax at the exit stop because at entry stop it only holds -ENOSYS (-38) which is a placeholder for the function not being implemented.
+                long long ret = (long long)regs.rax;
+                //-4095 and -1 means failure as that space is reserved for errors. Errno is basically just an integer value that stores errors and we negate the value before strerror turns it into text.
+                if (ret < 0 && ret >= -4095)
+                    printf(" = -1 (%s)\n", strerror((int)-ret));
+                //print brk and mmap results in hex whereas the rest are in decimal because it works directly in the memory address space
+                else if (regs.orig_rax == SYS_brk || regs.orig_rax == SYS_mmap)
+                    printf(" = 0x%llx\n", ret);
+                else
+                    printf(" = %lld\n", ret);
             }
         } else {
             //a real signal for the child: hand it back on the next resume.
             sig = WSTOPSIG(status);
         }
     }
+
+    //in_syscall can still be set after the loop because exit_group causes the kernel to never produce an exit stop for it since it terminates all threads.
+    if (in_syscall)
+        printf(" = ?\n");
 
     return 0;
 }
