@@ -1,4 +1,5 @@
 #include <stddef.h>
+#include <sys/syscall.h>
 #include "syscalls.h"
 
 struct syscall_entry {
@@ -87,4 +88,25 @@ int syscall_nargs(long nr)
 {
     const struct syscall_entry *e = find(nr);
     return e ? e->nargs : -1;
+}
+
+int syscall_path_arg(long nr)
+{
+    switch (nr) {
+    case SYS_open:
+    case SYS_access:
+    case SYS_execve:
+    case SYS_stat:
+    case SYS_lstat:
+    case SYS_statfs:
+    case SYS_chdir:
+    case SYS_unlink:
+    case SYS_readlink:
+        return 0;
+    case SYS_openat:
+    case SYS_newfstatat:
+        return 1;
+    default:
+        return -1;
+    }
 }

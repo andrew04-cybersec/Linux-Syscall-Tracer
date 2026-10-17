@@ -1,3 +1,5 @@
+#include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,9 +10,59 @@
 #include <sys/user.h>
 #include "syscalls.h"
 
-//print the first n syscall arguments as raw hex values. n < 0 means the syscall is unknown, so print "...".
-static void print_args(const struct user_regs_struct *regs, int n)
+#define MAX_STR 64
+
+//copy a NUL-terminated string out of the child's memory into buf (at most max-1 chars).
+//returns 0 if complete, 1 if cut off at max, -1 if the child's memory could not be read.
+static int read_string(pid_t pid, unsigned long long addr, char *buf, size_t max)
 {
+    size_t len = 0;
+
+    while (len < max - 1) {
+        errno = 0;
+        //we can't just dereference the pointer because it is in the child's address space, not ours so we won't have a mapping for that address. PTRACE_PEEKDATA instead can just read something in the tracee's memory as a word and return it as the result of the ptrace() call.
+        long word = ptrace(PTRACE_PEEKDATA, pid, (void *)(addr + len), NULL);
+        //we check the errno here instead of comparing word to -1 because -1 could be an error or actual data so we set errno to 0 beforehand and only treat -1 as an error if errno was set.
+        if (word == -1 && errno != 0)
+            return -1;
+        for (size_t i = 0; i < sizeof(word) && len < max - 1; i++) {
+            char c = (char)(word >> (8 * i));
+            if (c == '\0') {
+                buf[len] = '\0';
+                return 0;
+            }
+            buf[len++] = c;
+        }
+    }
+    buf[len] = '\0';
+    return 1;
+}
+
+//print s in double quotes, escaping anything that would mess up the terminal or hide data.
+static void print_string(const char *s, int truncated)
+{
+    putchar('"');
+    for (; *s; s++) {
+        if (*s == '"' || *s == '\\')
+            printf("\\%c", *s);
+        else if (*s == '\n')
+            printf("\\n");
+        else if (isprint((unsigned char)*s))
+            putchar(*s);
+        else
+            printf("\\x%02x", (unsigned char)*s);
+    }
+    putchar('"');
+    if (truncated)
+        printf("...");
+}
+
+//print the first n syscall arguments as raw hex values, except path arguments, which are read from the child and shown as strings. n < 0 means the syscall is unknown, so print "...".
+static void print_args(pid_t pid, const struct user_regs_struct *regs, int n)
+{
+    int path_arg = syscall_path_arg((long)regs->orig_rax);
+    char buf[MAX_STR];
+
     //the registers that carry the arguments are: rdi, rsi, rdx, r10, r8, r9
     //4th register is r10 instead of rcx because rcx is destroyed by hardware syscall instruction so r10 replaces it.
     unsigned long long args[6] = { regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8, regs->r9 };
@@ -19,8 +71,14 @@ static void print_args(const struct user_regs_struct *regs, int n)
         printf("...");
         return;
     }
-    for (int i = 0; i < n; i++)
-        printf("%s0x%llx", i ? ", " : "", args[i]);
+    for (int i = 0; i < n; i++) {
+        printf("%s", i ? ", " : "");
+        int rc = (i == path_arg) ? read_string(pid, args[i], buf, sizeof(buf)) : -1;
+        if (rc >= 0)
+            print_string(buf, rc);
+        else
+            printf("0x%llx", args[i]);
+    }
 }
 
 //resume the stopped child until it exits, printing the name, arguments, and return value.
@@ -66,7 +124,7 @@ static int trace_loop(pid_t pid)
                 else
                     printf("syscall_%llu(", regs.orig_rax);
                 //we print arguments at entry stop rather than exit stop because if we wait until exit stop then we will lose the arguments.
-                print_args(&regs, syscall_nargs((long)regs.orig_rax));
+                print_args(pid, &regs, syscall_nargs((long)regs.orig_rax));
                 printf(")");
                 //flush so our output stays in order with whatever the child writes before this syscall returns.
                 fflush(stdout);
