@@ -8,7 +8,22 @@
 #include <sys/user.h>
 #include "syscalls.h"
 
-//resume the stopped child until it exits, printing the raw number of each syscall it makes.
+//print the first n syscall arguments as raw hex values. n < 0 means the syscall is unknown, so print "...".
+static void print_args(const struct user_regs_struct *regs, int n)
+{
+    //the registers that carry the arguments are: rdi, rsi, rdx, r10, r8, r9
+    //4th register is r10 instead of rcx because rcx is destroyed by hardware syscall instruction so r10 replaces it.
+    unsigned long long args[6] = { regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8, regs->r9 };
+
+    if (n < 0) {
+        printf("...");
+        return;
+    }
+    for (int i = 0; i < n; i++)
+        printf("%s0x%llx", i ? ", " : "", args[i]);
+}
+
+//resume the stopped child until it exits, printing the name, arguments, and return value.
 static int trace_loop(pid_t pid)
 {
     //PTRACE_O_TRACESYSGOOD: when the kernel delivers system call traps it sets bit 7 in the signal number which makes it easier for the tracer to distinguish normal traps from system call traps.
@@ -47,9 +62,12 @@ static int trace_loop(pid_t pid)
                 //orig_rax over rax because orig_rax stores original syscall number for userspace and won't get overwritten
                 const char *name = syscall_name((long)regs.orig_rax);
                 if (name)
-                    printf("%s", name);
+                    printf("%s(", name);
                 else
-                    printf("syscall_%llu", regs.orig_rax);
+                    printf("syscall_%llu(", regs.orig_rax);
+                //we print arguments at entry stop rather than exit stop because if we wait until exit stop then we will lose the arguments.
+                print_args(&regs, syscall_nargs((long)regs.orig_rax));
+                printf(")");
                 //flush so our output stays in order with whatever the child writes before this syscall returns.
                 fflush(stdout);
             } else {
