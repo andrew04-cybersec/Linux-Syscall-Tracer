@@ -1,6 +1,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -11,6 +12,7 @@
 #include "syscalls.h"
 
 #define MAX_STR 64
+#define MAX_ARGV 16
 
 //copy a NUL-terminated string out of the child's memory into buf (at most max-1 chars).
 //returns 0 if complete, 1 if cut off at max, -1 if the child's memory could not be read.
@@ -57,6 +59,37 @@ static void print_string(const char *s, int truncated)
         printf("...");
 }
 
+//print the NULL-terminated array of string pointers at addr in the child, e.g. ["ls", "-l"]. stops after MAX_ARGV entries or at the first unreadable pointer, ending with "..." in either case.
+static void print_string_array(pid_t pid, unsigned long long addr)
+{
+    char buf[MAX_STR];
+    int complete = 0;
+    int i;
+
+    //argv is a pointer to an array of pointers so the first read gets the pointer array and the second read gets the actual string data. this can only be done at the entry stop since after a successful execve the old address space is replaced and by the exit stop the pointers no longer point at the data you want to read.
+    putchar('[');
+    for (i = 0; i < MAX_ARGV; i++) {
+        errno = 0;
+        long ptr = ptrace(PTRACE_PEEKDATA, pid, (void *)(addr + i * sizeof(long)), NULL);
+        if (ptr == -1 && errno != 0)
+            break;
+        //what marks the end of the argv array is when it reaches the tail of the pointer array which is a NULL pointer and we can't just ask the kernel how many entries it has because execve takes no length arguement which means that the only thing it is received is the address of the array and therefore the only signal of where it ends is the Null sentinel.
+        if (ptr == 0) {
+            complete = 1;
+            break;
+        }
+        printf("%s", i ? ", " : "");
+        int rc = read_string(pid, (unsigned long long)ptr, buf, sizeof(buf));
+        if (rc >= 0)
+            print_string(buf, rc);
+        else
+            printf("0x%lx", ptr);
+    }
+    if (!complete)
+        printf("%s...", i ? ", " : "");
+    putchar(']');
+}
+
 //print the first n syscall arguments as raw hex values, except path arguments, which are read from the child and shown as strings. n < 0 means the syscall is unknown, so print "...".
 static void print_args(pid_t pid, const struct user_regs_struct *regs, int n)
 {
@@ -73,6 +106,10 @@ static void print_args(pid_t pid, const struct user_regs_struct *regs, int n)
     }
     for (int i = 0; i < n; i++) {
         printf("%s", i ? ", " : "");
+        if (regs->orig_rax == SYS_execve && i == 1) {
+            print_string_array(pid, args[i]);
+            continue;
+        }
         int rc = (i == path_arg) ? read_string(pid, args[i], buf, sizeof(buf)) : -1;
         if (rc >= 0)
             print_string(buf, rc);
@@ -85,7 +122,8 @@ static void print_args(pid_t pid, const struct user_regs_struct *regs, int n)
 static int trace_loop(pid_t pid)
 {
     //PTRACE_O_TRACESYSGOOD: when the kernel delivers system call traps it sets bit 7 in the signal number which makes it easier for the tracer to distinguish normal traps from system call traps.
-    if (ptrace(PTRACE_SETOPTIONS, pid, NULL, PTRACE_O_TRACESYSGOOD) == -1) {
+    //tracer can't tell the difference between a real SIGTRAP signal and an ordinary signal-delivery after successful execve when PTRACE_O_TRACEEXEC is not set so we set it so it can actually tell the difference and doesn't produce a plain signal delivery stop. 
+    if (ptrace(PTRACE_SETOPTIONS, pid, NULL, PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACEEXEC) == -1) {
         perror("ptrace(SETOPTIONS)");
         return 1;
     }
@@ -141,8 +179,12 @@ static int trace_loop(pid_t pid)
                     printf(" = %lld\n", ret);
             }
         } else {
-            //a real signal for the child: hand it back on the next resume.
-            sig = WSTOPSIG(status);
+            //wrong to hand child a SIGTRAP here because it turns a message meant for the tracer into a signal the child receives and therefore will terminate and dump core by default. status >> 16 can tell a ptrace event stop from a real signal stop because the upper bits hold the ptrace event code so the result is nonzero for an event stop and zero for an ordinary signal stop.
+            if (status >> 16)
+                sig = 0;
+            else
+                //a real signal for the child: hand it back on the next resume.
+                sig = WSTOPSIG(status);
         }
     }
 
@@ -173,7 +215,9 @@ int main(int argc, char **argv)
             _exit(1);
         }
 
-        //child process stops before new program runs so the parent can act before it runs, i.e. set specified options
+        //child process stops itself here so that the trace_loop can set the options and the next syscall can be passed otherwise it would be invisible to the target program's own execve. The child can't just wait for the stop because it comes after the execve has already finished so the call has gone by before the tracer can watch for it.
+        raise(SIGSTOP);
+        //If the tracer resumed with SIGSTOP and not sig = 0 then it would just stop again after being given the signal whereas if you supress the signal then it can keep running. 
         execvp(argv[1], &argv[1]);
         perror("execvp");
         _exit(1);
@@ -187,7 +231,7 @@ int main(int argc, char **argv)
     }
 
     if (!WIFSTOPPED(status)) {
-        fprintf(stderr, "child did not stop after exec\n");
+        fprintf(stderr, "child did not stop before exec\n");
         return 1;
     }
 
