@@ -43,20 +43,20 @@ static int read_string(pid_t pid, unsigned long long addr, char *buf, size_t max
 //print s in double quotes, escaping anything that would mess up the terminal or hide data.
 static void print_string(const char *s, int truncated)
 {
-    putchar('"');
+    fputc('"', stderr);
     for (; *s; s++) {
         if (*s == '"' || *s == '\\')
-            printf("\\%c", *s);
+            fprintf(stderr, "\\%c", *s);
         else if (*s == '\n')
-            printf("\\n");
+            fprintf(stderr, "\\n");
         else if (isprint((unsigned char)*s))
-            putchar(*s);
+            fputc(*s, stderr);
         else
-            printf("\\x%02x", (unsigned char)*s);
+            fprintf(stderr, "\\x%02x", (unsigned char)*s);
     }
-    putchar('"');
+    fputc('"', stderr);
     if (truncated)
-        printf("...");
+        fprintf(stderr, "...");
 }
 
 //print the NULL-terminated array of string pointers at addr in the child, e.g. ["ls", "-l"]. stops after MAX_ARGV entries or at the first unreadable pointer, ending with "..." in either case.
@@ -67,7 +67,7 @@ static void print_string_array(pid_t pid, unsigned long long addr)
     int i;
 
     //argv is a pointer to an array of pointers so the first read gets the pointer array and the second read gets the actual string data. this can only be done at the entry stop since after a successful execve the old address space is replaced and by the exit stop the pointers no longer point at the data you want to read.
-    putchar('[');
+    fputc('[', stderr);
     for (i = 0; i < MAX_ARGV; i++) {
         errno = 0;
         long ptr = ptrace(PTRACE_PEEKDATA, pid, (void *)(addr + i * sizeof(long)), NULL);
@@ -78,16 +78,16 @@ static void print_string_array(pid_t pid, unsigned long long addr)
             complete = 1;
             break;
         }
-        printf("%s", i ? ", " : "");
+        fprintf(stderr, "%s", i ? ", " : "");
         int rc = read_string(pid, (unsigned long long)ptr, buf, sizeof(buf));
         if (rc >= 0)
             print_string(buf, rc);
         else
-            printf("0x%lx", ptr);
+            fprintf(stderr, "0x%lx", ptr);
     }
     if (!complete)
-        printf("%s...", i ? ", " : "");
-    putchar(']');
+        fprintf(stderr, "%s...", i ? ", " : "");
+    fputc(']', stderr);
 }
 
 //print the first n syscall arguments as raw hex values, except path arguments, which are read from the child and shown as strings. n < 0 means the syscall is unknown, so print "...".
@@ -101,11 +101,11 @@ static void print_args(pid_t pid, const struct user_regs_struct *regs, int n)
     unsigned long long args[6] = { regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8, regs->r9 };
 
     if (n < 0) {
-        printf("...");
+        fprintf(stderr, "...");
         return;
     }
     for (int i = 0; i < n; i++) {
-        printf("%s", i ? ", " : "");
+        fprintf(stderr, "%s", i ? ", " : "");
         if (regs->orig_rax == SYS_execve && i == 1) {
             print_string_array(pid, args[i]);
             continue;
@@ -114,7 +114,7 @@ static void print_args(pid_t pid, const struct user_regs_struct *regs, int n)
         if (rc >= 0)
             print_string(buf, rc);
         else
-            printf("0x%llx", args[i]);
+            fprintf(stderr, "0x%llx", args[i]);
     }
 }
 
@@ -158,25 +158,24 @@ static int trace_loop(pid_t pid)
                 //orig_rax over rax because orig_rax stores original syscall number for userspace and won't get overwritten
                 const char *name = syscall_name((long)regs.orig_rax);
                 if (name)
-                    printf("%s(", name);
+                    fprintf(stderr, "%s(", name);
                 else
-                    printf("syscall_%llu(", regs.orig_rax);
+                    fprintf(stderr, "syscall_%llu(", regs.orig_rax);
                 //we print arguments at entry stop rather than exit stop because if we wait until exit stop then we will lose the arguments.
                 print_args(pid, &regs, syscall_nargs((long)regs.orig_rax));
-                printf(")");
-                //flush so our output stays in order with whatever the child writes before this syscall returns.
-                fflush(stdout);
+                fprintf(stderr, ")");
+                //the trace goes to stderr instead of stdout so it stays separate from the traced program's own output and can be redirected on its own, e.g. 2>trace.log. stderr is unbuffered so each piece is written immediately and no fflush is needed.
             } else {
                 //read rax at the exit stop because at entry stop it only holds -ENOSYS (-38) which is a placeholder for the function not being implemented.
                 long long ret = (long long)regs.rax;
                 //-4095 and -1 means failure as that space is reserved for errors. Errno is basically just an integer value that stores errors and we negate the value before strerror turns it into text.
                 if (ret < 0 && ret >= -4095)
-                    printf(" = -1 (%s)\n", strerror((int)-ret));
+                    fprintf(stderr, " = -1 (%s)\n", strerror((int)-ret));
                 //print brk and mmap results in hex whereas the rest are in decimal because it works directly in the memory address space
                 else if (regs.orig_rax == SYS_brk || regs.orig_rax == SYS_mmap)
-                    printf(" = 0x%llx\n", ret);
+                    fprintf(stderr, " = 0x%llx\n", ret);
                 else
-                    printf(" = %lld\n", ret);
+                    fprintf(stderr, " = %lld\n", ret);
             }
         } else {
             //wrong to hand child a SIGTRAP here because it turns a message meant for the tracer into a signal the child receives and therefore will terminate and dump core by default. status >> 16 can tell a ptrace event stop from a real signal stop because the upper bits hold the ptrace event code so the result is nonzero for an event stop and zero for an ordinary signal stop.
@@ -190,7 +189,7 @@ static int trace_loop(pid_t pid)
 
     //in_syscall can still be set after the loop because exit_group causes the kernel to never produce an exit stop for it since it terminates all threads.
     if (in_syscall)
-        printf(" = ?\n");
+        fprintf(stderr, " = ?\n");
 
     return 0;
 }
