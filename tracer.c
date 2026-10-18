@@ -40,23 +40,45 @@ static int read_string(pid_t pid, unsigned long long addr, char *buf, size_t max
     return 1;
 }
 
-//print s in double quotes, escaping anything that would mess up the terminal or hide data.
-static void print_string(const char *s, int truncated)
+//copy exactly len bytes out of the child's memory into buf. returns 0 on success, -1 if the child's memory could not be read.
+static int read_bytes(pid_t pid, unsigned long long addr, char *buf, size_t len)
+{
+    for (size_t off = 0; off < len; off += sizeof(long)) {
+        errno = 0;
+        long word = ptrace(PTRACE_PEEKDATA, pid, (void *)(addr + off), NULL);
+        if (word == -1 && errno != 0)
+            return -1;
+        //the last word can hold more bytes than we asked for so only copy what is left.
+        size_t n = len - off < sizeof(word) ? len - off : sizeof(word);
+        memcpy(buf + off, &word, n);
+    }
+    return 0;
+}
+
+//print len bytes of buf in double quotes, escaping anything that would mess up the terminal or hide data.
+static void print_buffer(const char *buf, size_t len, int truncated)
 {
     fputc('"', stderr);
-    for (; *s; s++) {
-        if (*s == '"' || *s == '\\')
-            fprintf(stderr, "\\%c", *s);
-        else if (*s == '\n')
+    for (size_t i = 0; i < len; i++) {
+        char c = buf[i];
+        if (c == '"' || c == '\\')
+            fprintf(stderr, "\\%c", c);
+        else if (c == '\n')
             fprintf(stderr, "\\n");
-        else if (isprint((unsigned char)*s))
-            fputc(*s, stderr);
+        else if (isprint((unsigned char)c))
+            fputc(c, stderr);
         else
-            fprintf(stderr, "\\x%02x", (unsigned char)*s);
+            fprintf(stderr, "\\x%02x", (unsigned char)c);
     }
     fputc('"', stderr);
     if (truncated)
         fprintf(stderr, "...");
+}
+
+//print the NUL-terminated string s in double quotes.
+static void print_string(const char *s, int truncated)
+{
+    print_buffer(s, strlen(s), truncated);
 }
 
 //print the NULL-terminated array of string pointers at addr in the child, e.g. ["ls", "-l"]. stops after MAX_ARGV entries or at the first unreadable pointer, ending with "..." in either case.
@@ -90,6 +112,19 @@ static void print_string_array(pid_t pid, unsigned long long addr)
     fputc(']', stderr);
 }
 
+//print the buffer a write() is sending, read from the child at addr. count is the length the program asked to write, and at most MAX_STR - 1 bytes of it are shown.
+static void print_written(pid_t pid, unsigned long long addr, unsigned long long count)
+{
+    char buf[MAX_STR];
+    //a write buffer is not NUL-terminated and can hold any bytes, including zeros, so the length has to come from the count argument instead of from looking for a NUL like read_string does.
+    size_t len = count < sizeof(buf) - 1 ? count : sizeof(buf) - 1;
+
+    if (read_bytes(pid, addr, buf, len) == -1)
+        fprintf(stderr, "0x%llx", addr);
+    else
+        print_buffer(buf, len, count > len);
+}
+
 //print the first n syscall arguments as raw hex values, except path arguments, which are read from the child and shown as strings. n < 0 means the syscall is unknown, so print "...".
 static void print_args(pid_t pid, const struct user_regs_struct *regs, int n)
 {
@@ -108,6 +143,11 @@ static void print_args(pid_t pid, const struct user_regs_struct *regs, int n)
         fprintf(stderr, "%s", i ? ", " : "");
         if (regs->orig_rax == SYS_execve && i == 1) {
             print_string_array(pid, args[i]);
+            continue;
+        }
+        //for write the buffer is argument 1 and its length is argument 2, so it is decoded here at the entry stop like the other pointers.
+        if (regs->orig_rax == SYS_write && i == 1) {
+            print_written(pid, args[1], args[2]);
             continue;
         }
         int rc = (i == path_arg) ? read_string(pid, args[i], buf, sizeof(buf)) : -1;
