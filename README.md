@@ -3,7 +3,15 @@
 >
 > This repository preserves the Linux Syscall Tracer that won the Cipher Tech Best Digital Forensics Hack at Technica 2026. The original hackathon-winning version is permanently preserved under the `v1.0-technica` tag.
 >
-> The implementation is intentionally frozen and will not be extended with new features. A technical writeup is in progress that analyzes the tracer's `ptrace` architecture, syscall visibility, observed process behavior, and limitations, along with how those limitations motivate a move toward eBPF-based endpoint telemetry.
+> The implementation is intentionally frozen and will not be extended with new features.
+>
+> A technical writeup evaluating the frozen tracer is now available:
+>
+> **[Tracing Linux Process Behavior with ptrace: Building and Evaluating a Syscall-Level Forensics Tool](article/Tracing_Linux_Process_Behavior_with_ptrace.pdf)**
+>
+> The article examines the tracer's `ptrace` architecture, evaluates its syscall-level output against controlled workloads with known ground truth, and separates limitations of the frozen implementation from limitations of `ptrace` and the syscall boundary itself.
+>
+> The original evaluation evidence is preserved separately under [`evaluation/2026-10-25-ptrace-article/`](evaluation/2026-10-25-ptrace-article/) and the `eval-2026-10-25` tag.
 
 # Linux Syscall Tracer
 
