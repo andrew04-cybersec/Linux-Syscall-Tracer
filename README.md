@@ -5,7 +5,7 @@
 >
 > The implementation is intentionally frozen and will not be extended with new features.
 >
-> A technical writeup evaluating the frozen tracer is now available:
+> A security research artifact evaluating the frozen tracer is now available:
 >
 > **[Tracing Linux Process Behavior with ptrace: Building and Evaluating a Syscall-Level Forensics Tool](article/Tracing_Linux_Process_Behavior_with_ptrace.pdf)**
 >
